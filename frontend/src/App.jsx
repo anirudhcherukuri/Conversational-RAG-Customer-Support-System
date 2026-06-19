@@ -36,6 +36,7 @@ export default function App() {
   const [faithfulnessScore, setFaithfulnessScore] = useState(0.0);
   const [faithfulnessReason, setFaithfulnessReason] = useState("");
   const [attempts, setAttempts] = useState(0);
+  const [hasQueried, setHasQueried] = useState(false);
 
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -67,6 +68,7 @@ export default function App() {
     setFaithfulnessScore(0.0);
     setFaithfulnessReason("");
     setAttempts(0);
+    setHasQueried(false);
   }, [activeSession]);
 
   const handleCreateSession = () => {
@@ -157,6 +159,7 @@ export default function App() {
     setFaithfulnessScore(0.0);
     setFaithfulnessReason("");
     setAttempts(0);
+    setHasQueried(true);
 
     // Prepare assistant response slot
     const assistantMessageIndex = (chatHistory[activeSession] || []).length + 1;
@@ -495,24 +498,35 @@ export default function App() {
                     cy="60" 
                     r="50"
                     style={{
-                      strokeDashoffset: progressOffset,
-                      stroke: getScoreColor(faithfulnessScore)
+                      strokeDashoffset: hasQueried ? progressOffset : 314,
+                      stroke: hasQueried ? getScoreColor(faithfulnessScore) : "rgba(255, 255, 255, 0.1)"
                     }}
                   ></circle>
                 </svg>
                 <div className="gauge-text">
-                  <span className="gauge-number" style={{ color: getScoreColor(faithfulnessScore) }}>
-                    {faithfulnessScore.toFixed(2)}
+                  <span className="gauge-number" style={{ color: hasQueried ? getScoreColor(faithfulnessScore) : "hsl(var(--text-muted))" }}>
+                    {hasQueried ? faithfulnessScore.toFixed(2) : "--"}
                   </span>
                   <span className="gauge-percent">Faithful</span>
                 </div>
               </div>
               
-              <div className={`guardrail-status-pill ${faithfulnessScore >= confidenceThreshold ? 'status-passed' : 'status-failed'}`}>
-                {faithfulnessScore >= confidenceThreshold ? "Confidence High" : "Guardrail Flagged"}
+              <div className={`guardrail-status-pill ${
+                !hasQueried 
+                  ? 'status-neutral' 
+                  : faithfulnessScore >= confidenceThreshold 
+                    ? 'status-passed' 
+                    : 'status-failed'
+              }`}>
+                {!hasQueried 
+                  ? "Awaiting Query" 
+                  : faithfulnessScore >= confidenceThreshold 
+                    ? "Confidence High" 
+                    : "Guardrail Flagged"
+                }
               </div>
               
-              {faithfulnessReason && (
+              {hasQueried && faithfulnessReason && (
                 <div style={{ fontSize: "11px", color: "hsl(var(--text-secondary))", marginTop: "12px", textAlign: "center", fontStyle: "italic" }}>
                   "{faithfulnessReason}"
                 </div>
