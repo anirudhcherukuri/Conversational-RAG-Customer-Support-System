@@ -38,7 +38,7 @@ export default function App() {
   const [attempts, setAttempts] = useState(0);
   const [hasQueried, setHasQueried] = useState(false);
 
-  const messagesEndRef = useRef(null);
+  const messagesListRef = useRef(null);
   const fileInputRef = useRef(null);
 
   // Prevent browser scroll restoration and input-focus window scroll issues
@@ -63,7 +63,9 @@ export default function App() {
 
   // Auto scroll to bottom of chat
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (messagesListRef.current) {
+      messagesListRef.current.scrollTop = messagesListRef.current.scrollHeight;
+    }
   }, [chatHistory, activeSession]);
 
   // Fetch documents uploaded for the active session
@@ -470,7 +472,7 @@ export default function App() {
             )}
           </header>
 
-          <div className="messages-list">
+          <div ref={messagesListRef} className="messages-list">
             {(chatHistory[activeSession] || []).map((msg, idx) => (
               <div key={idx} className={`message-wrapper ${msg.role}`}>
                 <div className="message-bubble">
@@ -483,7 +485,6 @@ export default function App() {
                 </div>
               </div>
             ))}
-            <div ref={messagesEndRef} />
           </div>
 
           <form className="chat-input-bar" onSubmit={handleSendMessage}>
