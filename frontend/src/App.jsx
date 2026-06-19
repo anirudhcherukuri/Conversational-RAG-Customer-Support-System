@@ -41,6 +41,17 @@ export default function App() {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
+  // Prevent browser scroll restoration issues on mount
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    if (document.documentElement) {
+      document.documentElement.scrollTop = 0;
+    }
+    if (document.body) {
+      document.body.scrollTop = 0;
+    }
+  }, []);
+
   // Auto scroll to bottom of chat
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
