@@ -307,7 +307,7 @@ def generate_node(state: RAGState) -> Dict[str, Any]:
         logs.append("Applying hallucination correction instructions to generation prompt.")
 
     try:
-        llm = ChatGroq(model_name="mixtral-8x7b-32768", temperature=0.1)
+        llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0.1)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
