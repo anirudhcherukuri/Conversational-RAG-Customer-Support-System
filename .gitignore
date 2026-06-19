@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.env
+.env.*
+
+# Chroma DB files
+chroma_db/
+*.db
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# IDE / System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
