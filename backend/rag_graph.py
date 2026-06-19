@@ -13,7 +13,10 @@ from langgraph.graph import StateGraph, START, END
 import chromadb
 from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
-load_dotenv()
+# Load .env file from the backend directory specifically
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+dotenv_path = os.path.join(backend_dir, ".env")
+load_dotenv(dotenv_path=dotenv_path)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
