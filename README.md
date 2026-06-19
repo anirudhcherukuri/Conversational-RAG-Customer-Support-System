@@ -4,8 +4,8 @@ A production-grade, high-fidelity customer support chat system built with **Lang
 
 ## 🚀 Key Features
 
-- **Hybrid Retrieval (Dense + Sparse)**: Combines dense similarity search (ChromaDB + HuggingFace Embeddings) with sparse keyword search (BM25) using Reciprocal Rank Fusion (RRF).
-- **Cross-Encoder Reranking**: Uses a local `ms-marco-MiniLM-L-6-v2` reranker to score and select the top $K$ most relevant context documents.
+- **Hybrid Retrieval (Dense + Sparse)**: Combines dense similarity search (ChromaDB + lightweight ONNX embeddings) with sparse keyword search (BM25) using Reciprocal Rank Fusion (RRF).
+- **Lightweight Cosine Similarity Reranking**: Uses a fast, memory-optimized TF-IDF cosine similarity scorer to evaluate and select the top $K$ most relevant context documents (keeping RAM usage under 150MB to fit Render Free Tier).
 - **Hallucination Guardrails**: Implements a RAGAS-style faithfulness checker (using a Groq LLM) that checks if all generated statements are supported by the retrieved context. If the faithfulness score is below `0.4`, it automatically loops back to regenerate or falls back to a safe support response, reducing hallucinations by 35%.
 - **Streaming FastAPI Backend**: Exposes endpoints for streaming events (SSE) that stream the RAG execution trace (retrieved docs, reranking scores, guardrail logs, and final answers).
 - **Per-Session ChromaDB Storage**: Dynamically instantiates and queries session-specific collections. Support representatives or users can upload custom text, markdown, or PDF files to index them on-the-fly.
@@ -21,8 +21,8 @@ graph TD
     B -->|Sparse Search| D[BM25]
     C --> E[RRF Fusion]
     D --> E
-    E --> F[Cross-Encoder Reranking]
-    F -->|Top K Documents| G[Groq Mixtral-8x7b LLM]
+    E --> F[TF-IDF Cosine Reranking]
+    F -->|Top K Documents| G[Groq Llama-3.3-70b LLM]
     G --> H[Generated Answer]
     H --> I[Faithfulness Guardrail Node]
     I -->|RAGAS Evaluation| J{Score >= 0.4?}
@@ -35,7 +35,7 @@ graph TD
 
 ## 📦 Tech Stack
 
-- **Backend**: Python 3.11, FastAPI, LangGraph, LangChain, ChromaDB, rank-bm25, sentence-transformers, Groq API (Mixtral-8x7b-32768, Llama-3.1-8b-instant).
+- **Backend**: Python 3.11, FastAPI, LangGraph, LangChain, ChromaDB (ONNX embeddings), rank-bm25, scikit-learn (TF-IDF), Groq API (Llama-3.3-70b-versatile, Llama-3.1-8b-instant).
 - **Frontend**: React (Vite), HTML5, Custom Glassmorphic CSS (no Tailwind for maximum flexibility and clean layouts).
 - **Deployment**: Render (Backend), Netlify (Frontend).
 
