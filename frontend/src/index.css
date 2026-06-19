@@ -47,11 +47,17 @@ body,
   overflow: hidden;
 }
 
+html,
+body {
+  position: fixed;
+  top: 0;
+  left: 0;
+}
+
 body {
   font-family: var(--font-sans);
   background-color: hsl(var(--bg-midnight));
   color: hsl(var(--text-primary));
-  position: relative;
 }
 
 /* Floating Vibrant Color Blobs for Neon Ambient glow */
