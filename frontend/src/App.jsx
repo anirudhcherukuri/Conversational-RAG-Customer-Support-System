@@ -41,15 +41,24 @@ export default function App() {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Prevent browser scroll restoration issues on mount
+  // Prevent browser scroll restoration and input-focus window scroll issues
   useEffect(() => {
-    window.scrollTo(0, 0);
-    if (document.documentElement) {
-      document.documentElement.scrollTop = 0;
-    }
-    if (document.body) {
-      document.body.scrollTop = 0;
-    }
+    const handleScroll = () => {
+      window.scrollTo(0, 0);
+      if (document.documentElement) {
+        document.documentElement.scrollTop = 0;
+      }
+      if (document.body) {
+        document.body.scrollTop = 0;
+      }
+    };
+    
+    window.addEventListener("scroll", handleScroll);
+    handleScroll(); // Initial snap
+    
+    return () => {
+      window.removeEventListener("scroll", handleScroll);
+    };
   }, []);
 
   // Auto scroll to bottom of chat
