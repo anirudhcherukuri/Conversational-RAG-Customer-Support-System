@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import json
 
 # Import the RAG graph and chroma client
-from rag_graph import rag_graph, chroma_client
+from rag_graph import rag_graph, chroma_client, onnx_ef
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -241,7 +241,10 @@ async def upload_document(
         
         # Save to session collection in Chroma
         session_collection_name = f"session_{session_id}"
-        collection = chroma_client.get_or_create_collection(name=session_collection_name)
+        collection = chroma_client.get_or_create_collection(
+            name=session_collection_name,
+            embedding_function=onnx_ef
+        )
         
         # Prepare IDs and Metadatas
         ids = [f"{session_id}_{file.filename}_chunk_{idx}" for idx in range(len(chunks))]

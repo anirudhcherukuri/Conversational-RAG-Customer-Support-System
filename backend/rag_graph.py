@@ -11,22 +11,21 @@ from langgraph.graph import StateGraph, START, END
 
 # Import Chroma and embeddings
 import chromadb
-from sentence_transformers import CrossEncoder
+from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Initialize Cross-Encoder for reranking
-# ms-marco-MiniLM-L-6-v2 is a lightweight, high-performance reranker
+# Initialize ONNX-based embedding function (CPU-friendly, lightweight, no PyTorch)
 try:
-    logger.info("Loading Cross-Encoder model...")
-    rerank_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-    logger.info("Cross-Encoder loaded successfully.")
+    logger.info("Initializing ONNX embedding model...")
+    onnx_ef = ONNXMiniLM_L6_V2()
+    logger.info("ONNX embedding model initialized.")
 except Exception as e:
-    logger.error(f"Failed to load Cross-Encoder: {e}. Fallback to dummy reranking will be used if necessary.")
-    rerank_model = None
+    logger.error(f"Failed to initialize ONNX embedding model: {e}")
+    onnx_ef = None
 
 # Initialize Groq LLM
 # Make sure GROQ_API_KEY is in the environment
@@ -39,7 +38,10 @@ CHROMA_DATA_PATH = os.path.join(os.path.dirname(__file__), "chroma_db")
 chroma_client = chromadb.PersistentClient(path=CHROMA_DATA_PATH)
 
 # Retrieve default collection or create one
-default_collection = chroma_client.get_or_create_collection(name="default_faq")
+default_collection = chroma_client.get_or_create_collection(
+    name="default_faq",
+    embedding_function=onnx_ef
+)
 
 # Add some seed/default FAQ documents if default_collection is empty
 if default_collection.count() == 0:
@@ -111,7 +113,10 @@ def retrieve_node(state: RAGState) -> Dict[str, Any]:
     # If session doesn't exist, we fallback to default collection
     session_collection_name = f"session_{session_id}"
     try:
-        collection = chroma_client.get_collection(name=session_collection_name)
+        collection = chroma_client.get_collection(
+            name=session_collection_name,
+            embedding_function=onnx_ef
+        )
         logs.append(f"Using session-specific collection: {session_collection_name}")
     except Exception:
         collection = default_collection
@@ -216,7 +221,7 @@ def retrieve_node(state: RAGState) -> Dict[str, Any]:
 
 def rerank_node(state: RAGState) -> Dict[str, Any]:
     """
-    Reranks documents using Cross-Encoder model.
+    Reranks documents using a lightweight TF-IDF cosine similarity scorer.
     """
     question = state["question"]
     raw_docs = state["raw_documents"]
@@ -226,31 +231,33 @@ def rerank_node(state: RAGState) -> Dict[str, Any]:
         logs.append("Reranking skipped (no documents retrieved).")
         return {"reranked_documents": [], "logs": logs}
         
-    if not rerank_model:
-        logs.append("Cross-Encoder model not available. Skipping reranking (using raw retrieval order).")
-        return {"reranked_documents": raw_docs[:4], "logs": logs}
-        
-    logs.append(f"Running Cross-Encoder reranking for {len(raw_docs)} documents...")
-    
-    # Build query-document pairs
-    pairs = [[question, doc["text"]] for doc in raw_docs]
+    logs.append(f"Running lightweight TF-IDF reranking for {len(raw_docs)} documents...")
     
     try:
-        # CrossEncoder returns a list of float scores
-        scores = rerank_model.predict(pairs)
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
         
-        # Attach scores
+        texts = [doc["text"] for doc in raw_docs]
+        # Fit vectorizer on documents and the question
+        vectorizer = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(texts + [question])
+        
+        # The last row is the query vector
+        query_vector = tfidf_matrix[-1]
+        doc_vectors = tfidf_matrix[:-1]
+        
+        # Cosine similarity
+        similarities = cosine_similarity(doc_vectors, query_vector).flatten()
+        
         scored_docs = []
         for idx, doc in enumerate(raw_docs):
             scored_docs.append({
                 **doc,
-                "rerank_score": float(scores[idx])
+                "rerank_score": float(similarities[idx])
             })
             
-        # Sort by rerank score descending
+        # Sort by score descending
         scored_docs.sort(key=lambda x: x["rerank_score"], reverse=True)
-        
-        # Keep top 4
         reranked_docs = scored_docs[:4]
         
         # Log scores
@@ -260,7 +267,7 @@ def rerank_node(state: RAGState) -> Dict[str, Any]:
         return {"reranked_documents": reranked_docs, "logs": logs}
     except Exception as e:
         logger.error(f"Reranking failed: {e}")
-        logs.append(f"Cross-Encoder reranking failed: {e}. Falling back to default order.")
+        logs.append(f"Reranking failed: {e}. Falling back to default order.")
         return {"reranked_documents": raw_docs[:4], "logs": logs}
 
 
