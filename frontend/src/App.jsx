@@ -61,10 +61,13 @@ export default function App() {
     };
   }, []);
 
-  // Auto scroll to bottom of chat
+  // Auto scroll to bottom of chat container programmatically without window scroll leakage
   useEffect(() => {
     if (messagesListRef.current) {
-      messagesListRef.current.scrollTop = messagesListRef.current.scrollHeight;
+      messagesListRef.current.scrollTo({
+        top: messagesListRef.current.scrollHeight,
+        behavior: "smooth"
+      });
     }
   }, [chatHistory, activeSession]);
 
