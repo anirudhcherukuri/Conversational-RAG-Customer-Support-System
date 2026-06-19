@@ -321,7 +321,13 @@ export default function App() {
       {/* Sidebar Panel */}
       <aside className="sidebar glass-panel">
         <div className="brand">
-          <div className="brand-icon">Ω</div>
+          <div className="brand-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+              <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+              <line x1="12" y1="22.08" x2="12" y2="12"></line>
+            </svg>
+          </div>
           <div className="brand-name">Conversational RAG</div>
         </div>
 
@@ -342,13 +348,18 @@ export default function App() {
                   {sid === "session_default" ? "Primary FAQ Channel" : `Ticket #${sid.split('_')[1]?.slice(-4) || 'Custom'}`}
                 </span>
                 {sid !== "session_default" && (
-                  <span className="file-delete" onClick={(e) => {
+                  <span className="file-delete" style={{ display: 'flex', alignItems: 'center' }} onClick={(e) => {
                     e.stopPropagation();
                     // Remove from list
                     setSessions(prev => prev.filter(x => x !== sid));
                     if (activeSession === sid) setActiveSession("session_default");
                     handleClearSessionData(sid);
-                  }}>×</span>
+                  }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="18" y1="6" x2="6" y2="18"></line>
+                      <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                  </span>
                 )}
               </div>
             ))}
@@ -358,7 +369,13 @@ export default function App() {
         <div>
           <h3 className="section-title">Knowledge Ingestion</h3>
           <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
-            <div className="upload-icon">✦</div>
+            <div className="upload-icon" style={{ display: 'flex', justifyContent: 'center' }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'hsl(var(--secondary))', marginBottom: '8px' }}>
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+            </div>
             <div className="upload-text">Upload Knowledge base</div>
             <div className="upload-subtext">Supports PDF, TXT, MD up to 10MB</div>
             <input 
@@ -455,8 +472,11 @@ export default function App() {
               onChange={(e) => setInputText(e.target.value)}
               disabled={isGenerating}
             />
-            <button className="btn-send" type="submit" disabled={isGenerating || !inputText.trim()}>
-              ➤
+            <button className="btn-send" type="submit" aria-label="Send message" disabled={isGenerating || !inputText.trim()}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
             </button>
           </form>
         </div>
