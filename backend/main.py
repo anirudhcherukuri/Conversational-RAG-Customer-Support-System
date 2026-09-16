@@ -1,5 +1,6 @@
 import os
 import shutil
+import asyncio
 import json
 import logging
 import uuid
@@ -274,15 +275,14 @@ async def chat_endpoint(
 async def chat_stream_endpoint(
     request: ChatRequest
 ):
-
     """
-    Stream LangGraph execution steps using Server-Sent Events.
+    Run the synchronous LangGraph RAG pipeline in a worker thread
+    and return the result through Server-Sent Events.
 
-    IMPORTANT:
-    The graph is executed ONLY ONCE.
-
-    Each LangGraph node update is sent immediately
-    to the frontend.
+    The graph uses synchronous nodes, so we intentionally use
+    rag_graph.invoke() inside asyncio.to_thread() instead of
+    rag_graph.astream(). This avoids the async-executor
+    CancelledError seen in the deployed Render service.
     """
 
     logger.info(
@@ -291,190 +291,115 @@ async def chat_stream_endpoint(
         f"| session={request.session_id}"
     )
 
-
     async def event_generator():
 
-        initial_state = create_initial_state(
-            request
-        )
-
-
-        # ----------------------------------------------------
-        # Keep track of the latest complete state
-        # ----------------------------------------------------
-
-        final_state = dict(
-            initial_state
-        )
-
+        initial_state = create_initial_state(request)
 
         try:
+            # Send an immediate event so the browser/proxy knows
+            # the stream has started.
+            yield (
+                "data: "
+                + json.dumps({
+                    "node": "start",
+                    "generation": "",
+                    "faithfulness_score": 0.0,
+                    "faithfulness_reason": "",
+                    "raw_documents": [],
+                    "reranked_documents": [],
+                    "logs": ["RAG pipeline started."]
+                })
+                + "\n\n"
+            )
 
-            # ------------------------------------------------
-            # SEND IMMEDIATE CONNECTION EVENT
-            # ------------------------------------------------
-            #
-            # This is useful for Render/proxy connections.
-            # The client immediately receives data instead
-            # of waiting for retrieval/LLM processing.
-            #
+            # Run the complete synchronous graph ONCE in a
+            # worker thread. Do not call rag_graph.astream().
+            final_state = await asyncio.to_thread(
+                rag_graph.invoke,
+                initial_state
+            )
 
-            connection_payload = {
+            all_logs = final_state.get("logs", [])
 
-                "node":
-                    "start",
-
-                "generation":
-                    "",
-
-                "faithfulness_score":
-                    0.0,
-
-                "faithfulness_reason":
-                    "",
-
-                "raw_documents":
-                    [],
-
-                "reranked_documents":
-                    [],
-
-                "logs":
-                    [
-                        "RAG pipeline started."
-                    ]
-            }
-
+            # Retrieval update
+            retrieval_logs = [
+                log for log in all_logs
+                if (
+                    "retriev" in log.lower()
+                    or "collection" in log.lower()
+                    or "dense" in log.lower()
+                    or "bm25" in log.lower()
+                    or "hybrid" in log.lower()
+                )
+            ]
 
             yield (
-                f"data: "
-                f"{json.dumps(connection_payload)}"
-                f"\n\n"
-            )
-
-
-            # ------------------------------------------------
-            # RUN LANGGRAPH ONCE
-            # ------------------------------------------------
-
-            async for event in rag_graph.astream(
-                initial_state,
-                stream_mode="updates"
-            ):
-
-                if not event:
-
-                    continue
-
-
-                # --------------------------------------------
-                # Identify node
-                # --------------------------------------------
-
-                node_name = next(
-                    iter(event.keys())
-                )
-
-                node_data = (
-                    event[node_name]
-                    or {}
-                )
-
-
-                # --------------------------------------------
-                # Update final state
-                # --------------------------------------------
-
-                for key, value in node_data.items():
-
-                    final_state[key] = value
-
-
-                # --------------------------------------------
-                # Build streaming payload
-                # --------------------------------------------
-
-                payload = {
-
-                    "node":
-                        node_name,
-
-                    "logs":
-                        node_data.get(
-                            "logs",
-                            final_state.get(
-                                "logs",
-                                []
-                            )
-                        ),
-
+                "data: "
+                + json.dumps({
+                    "node": "retrieve",
+                    "generation": "",
+                    "faithfulness_score": 0.0,
+                    "faithfulness_reason": "",
                     "raw_documents":
-                        node_data.get(
-                            "raw_documents",
-                            final_state.get(
-                                "raw_documents",
-                                []
-                            )
-                        ),
-
-                    "reranked_documents":
-                        node_data.get(
-                            "reranked_documents",
-                            final_state.get(
-                                "reranked_documents",
-                                []
-                            )
-                        ),
-
-                    "generation":
-                        node_data.get(
-                            "generation",
-                            final_state.get(
-                                "generation",
-                                ""
-                            )
-                        ),
-
-                    "faithfulness_score":
-                        node_data.get(
-                            "faithfulness_score",
-                            final_state.get(
-                                "faithfulness_score",
-                                0.0
-                            )
-                        ),
-
-                    "faithfulness_reason":
-                        node_data.get(
-                            "faithfulness_reason",
-                            final_state.get(
-                                "faithfulness_reason",
-                                ""
-                            )
-                        )
-                }
-
-
-                # --------------------------------------------
-                # Send node update
-                # --------------------------------------------
-
-                yield (
-                    f"data: "
-                    f"{json.dumps(payload)}"
-                    f"\n\n"
-                )
-
-
-            # =================================================
-            # GRAPH FINISHED
-            # =================================================
-
-            generation = final_state.get(
-                "generation",
-                ""
+                        final_state.get("raw_documents", []),
+                    "reranked_documents": [],
+                    "logs": retrieval_logs
+                })
+                + "\n\n"
             )
 
+            # Reranking update
+            rerank_logs = [
+                log for log in all_logs
+                if (
+                    "rerank" in log.lower()
+                    or "rank " in log.lower()
+                )
+            ]
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "node": "rerank",
+                    "generation": "",
+                    "faithfulness_score": 0.0,
+                    "faithfulness_reason": "",
+                    "raw_documents":
+                        final_state.get("raw_documents", []),
+                    "reranked_documents":
+                        final_state.get("reranked_documents", []),
+                    "logs": rerank_logs
+                })
+                + "\n\n"
+            )
+
+            # Generation update
+            generation_logs = [
+                log for log in all_logs
+                if (
+                    "generat" in log.lower()
+                    or "llm" in log.lower()
+                )
+            ]
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "node": "generate",
+                    "generation":
+                        final_state.get("generation", ""),
+                    "faithfulness_score": 0.0,
+                    "faithfulness_reason": "",
+                    "raw_documents":
+                        final_state.get("raw_documents", []),
+                    "reranked_documents":
+                        final_state.get("reranked_documents", []),
+                    "logs": generation_logs
+                })
+                + "\n\n"
+            )
+
+            # Guardrail update
             score = float(
                 final_state.get(
                     "faithfulness_score",
@@ -482,20 +407,51 @@ async def chat_stream_endpoint(
                 )
             )
 
-            threshold = (
-                request.confidence_threshold
+            guardrail_logs = [
+                log for log in all_logs
+                if (
+                    "faith" in log.lower()
+                    or "guardrail" in log.lower()
+                    or "hallucination" in log.lower()
+                )
+            ]
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "node": "guardrail",
+                    "generation":
+                        final_state.get("generation", ""),
+                    "faithfulness_score": score,
+                    "faithfulness_reason":
+                        final_state.get(
+                            "faithfulness_reason",
+                            ""
+                        ),
+                    "raw_documents":
+                        final_state.get("raw_documents", []),
+                    "reranked_documents":
+                        final_state.get("reranked_documents", []),
+                    "logs": guardrail_logs
+                })
+                + "\n\n"
             )
 
+            # Safe fallback if the final faithfulness score is
+            # below the user's configured threshold.
+            generation = final_state.get(
+                "generation",
+                ""
+            )
 
-            # ------------------------------------------------
-            # SAFE FALLBACK
-            # ------------------------------------------------
+            threshold = float(
+                request.confidence_threshold
+            )
 
             if (
                 score < threshold
                 and "Error:" not in generation
             ):
-
                 generation = (
                     "I am sorry, but I cannot confidently "
                     "answer that question based on the "
@@ -504,107 +460,90 @@ async def chat_stream_endpoint(
                     "to a live support agent?"
                 )
 
-
-                final_state["generation"] = (
-                    generation
-                )
-
+                final_state["generation"] = generation
 
                 final_state.setdefault(
                     "logs",
                     []
                 ).append(
-                    "Final Answer failed guardrail. "
+                    "Final answer failed guardrail. "
                     "Safe fallback activated."
                 )
 
-
-            # =================================================
-            # FINAL PAYLOAD
-            # =================================================
-
+            # Final event consumed by the React frontend.
             final_payload = {
-
-                "node":
-                    "complete",
-
-                "generation":
-                    generation,
-
-                "faithfulness_score":
-                    score,
-
+                "node": "complete",
+                "generation": generation,
+                "faithfulness_score": score,
                 "faithfulness_reason":
                     final_state.get(
                         "faithfulness_reason",
                         ""
                     ),
-
-                "logs":
+                "attempts":
                     final_state.get(
-                        "logs",
-                        []
+                        "attempts",
+                        0
                     ),
-
                 "raw_documents":
                     final_state.get(
                         "raw_documents",
                         []
                     ),
-
                 "reranked_documents":
                     final_state.get(
                         "reranked_documents",
                         []
+                    ),
+                "logs":
+                    final_state.get(
+                        "logs",
+                        []
                     )
             }
 
-
             yield (
-                f"data: "
-                f"{json.dumps(final_payload)}"
-                f"\n\n"
+                "data: "
+                + json.dumps(final_payload)
+                + "\n\n"
             )
-
 
             logger.info(
                 "Streaming RAG request completed successfully."
             )
 
+        except asyncio.CancelledError:
+            logger.warning(
+                "Chat stream request was cancelled by "
+                "the client or upstream connection."
+            )
+            return
 
         except Exception as e:
-
-            # -----------------------------------------------
-            # IMPORTANT:
-            # Send the actual error to the frontend as SSE
-            # instead of allowing the connection to silently
-            # fail.
-            # -----------------------------------------------
-
             logger.exception(
                 "Error in stream endpoint"
             )
 
-
             error_payload = {
-
-                "node":
-                    "error",
-
-                "message":
-                    str(e),
-
+                "node": "error",
+                "message": str(e),
                 "generation":
                     "Error: Failed to generate response from LLM.",
-
-                "faithfulness_score":
-                    0.0,
-
+                "faithfulness_score": 0.0,
                 "faithfulness_reason":
                     "Generation or pipeline error.",
-
+                "raw_documents":
+                    initial_state.get(
+                        "raw_documents",
+                        []
+                    ),
+                "reranked_documents":
+                    initial_state.get(
+                        "reranked_documents",
+                        []
+                    ),
                 "logs":
-                    final_state.get(
+                    initial_state.get(
                         "logs",
                         []
                     ) + [
@@ -612,34 +551,19 @@ async def chat_stream_endpoint(
                     ]
             }
 
-
             yield (
-                f"data: "
-                f"{json.dumps(error_payload)}"
-                f"\n\n"
+                "data: "
+                + json.dumps(error_payload)
+                + "\n\n"
             )
 
-
-    # ========================================================
-    # RETURN SSE RESPONSE
-    # ========================================================
-
     return StreamingResponse(
-
         event_generator(),
-
         media_type="text/event-stream",
-
         headers={
-
-            "Cache-Control":
-                "no-cache",
-
-            "Connection":
-                "keep-alive",
-
-            "X-Accel-Buffering":
-                "no"
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         }
     )
 
