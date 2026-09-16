@@ -1,4 +1,9 @@
 import os
+
+# Disable Chroma telemetry. It is not required by the application and the
+# deployed Chroma version has been producing non-fatal telemetry errors.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
+
 import shutil
 import asyncio
 import threading
@@ -37,6 +42,14 @@ logging.basicConfig(level=logging.INFO)
 # ChromaDB writes/embedding generation can be CPU-intensive and may not be
 # safe to run concurrently on a small Render instance. Serialize writes.
 chroma_write_lock = threading.Lock()
+
+# Frontend supports uploads up to 10 MB. Enforce the same limit on the backend
+# so a large request cannot unexpectedly exhaust the Render instance.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# Smaller batches reduce peak memory/CPU pressure during ONNX embedding and
+# Chroma insertion on a small Render instance.
+CHROMA_BATCH_SIZE = 8
 
 
 # ============================================================
@@ -739,7 +752,10 @@ def _process_and_index_document(
     # Chroma embedding + writes are blocking and relatively expensive.
     # Serialize this critical section to reduce intermittent failures when
     # more than one request reaches the same Render instance.
+    logger.info("[UPLOAD] Waiting for Chroma write lock...")
+
     with chroma_write_lock:
+        logger.info("[UPLOAD] Chroma write lock acquired.")
         collection = chroma_client.get_or_create_collection(
             name=session_collection_name,
             embedding_function=onnx_ef,
@@ -747,7 +763,7 @@ def _process_and_index_document(
 
         # Batch large documents instead of sending every chunk in one
         # enormous Chroma operation.
-        batch_size = 32
+        batch_size = CHROMA_BATCH_SIZE
 
         for start_idx in range(0, len(chunks), batch_size):
             end_idx = min(
@@ -767,6 +783,7 @@ def _process_and_index_document(
                 ids=ids[start_idx:end_idx],
             )
 
+    logger.info("[UPLOAD] Chroma write lock released.")
     logger.info(
         f"[UPLOAD] Chroma indexing completed: "
         f"{len(chunks)} chunks."
@@ -843,6 +860,16 @@ async def upload_document(
                 detail="Uploaded file is empty."
             )
 
+        if len(file_bytes) > MAX_UPLOAD_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File is too large ({size_mb:.2f} MB). "
+                    "Maximum supported size is 10 MB."
+                )
+            )
+
         logger.info(
             f"[UPLOAD] Received {len(file_bytes) / 1024:.1f} KB "
             f"for '{filename}'."
@@ -851,6 +878,10 @@ async def upload_document(
         # ----------------------------------------------------
         # PROCESS IN WORKER THREAD
         # ----------------------------------------------------
+
+        logger.info(
+            f"[UPLOAD] Starting background processing for '{filename}'..."
+        )
 
         result = await asyncio.to_thread(
             _process_and_index_document,
