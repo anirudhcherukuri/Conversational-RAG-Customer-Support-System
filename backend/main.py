@@ -1,6 +1,7 @@
 import os
 import shutil
 import asyncio
+import threading
 import json
 import logging
 import uuid
@@ -32,6 +33,10 @@ from rag_graph import (
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# ChromaDB writes/embedding generation can be CPU-intensive and may not be
+# safe to run concurrently on a small Render instance. Serialize writes.
+chroma_write_lock = threading.Lock()
 
 
 # ============================================================
@@ -572,50 +577,242 @@ async def chat_stream_endpoint(
 # UPLOAD DOCUMENT
 # ============================================================
 
+def _process_and_index_document(
+    file_bytes: bytes,
+    filename: str,
+    file_ext: str,
+    session_id: str,
+) -> Dict[str, Any]:
+    """
+    CPU/blocking portion of document ingestion.
+
+    This function intentionally runs in a worker thread from the async
+    endpoint. PDF parsing, text processing and Chroma embedding/indexing
+    should not block FastAPI's event loop.
+    """
+
+    logger.info(
+        f"[UPLOAD] Processing '{filename}' "
+        f"({len(file_bytes) / 1024:.1f} KB)"
+    )
+
+    # --------------------------------------------------------
+    # TEXT EXTRACTION
+    # --------------------------------------------------------
+
+    content = ""
+
+    if file_ext in [".txt", ".md"]:
+        logger.info(f"[UPLOAD] Decoding {file_ext} document...")
+        content = file_bytes.decode("utf-8", errors="ignore")
+
+    elif file_ext == ".pdf":
+        logger.info("[UPLOAD] Starting PDF text extraction...")
+
+        try:
+            import io
+            import pypdf
+
+            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+
+            text_list = []
+            page_count = len(reader.pages)
+
+            logger.info(
+                f"[UPLOAD] PDF opened successfully: "
+                f"{page_count} pages."
+            )
+
+            for page_number, page in enumerate(reader.pages, start=1):
+                page_text = page.extract_text() or ""
+                text_list.append(page_text)
+
+                # Avoid logging every page for very large PDFs.
+                if page_number == 1 or page_number == page_count:
+                    logger.info(
+                        f"[UPLOAD] Extracted page "
+                        f"{page_number}/{page_count}"
+                    )
+
+            content = "\n".join(text_list)
+
+            logger.info(
+                f"[UPLOAD] PDF extraction completed: "
+                f"{len(content)} characters."
+            )
+
+        except ImportError:
+            raise RuntimeError(
+                "PDF parsing package (pypdf) is not installed "
+                "on the server."
+            )
+
+        except Exception as e:
+            logger.exception("[UPLOAD] PDF extraction failed")
+            raise RuntimeError(
+                f"PDF extraction failed: {str(e)}"
+            )
+
+    # --------------------------------------------------------
+    # CONTENT VALIDATION
+    # --------------------------------------------------------
+
+    if not content.strip():
+        raise ValueError("Uploaded file is empty.")
+
+    logger.info(
+        f"[UPLOAD] Document contains "
+        f"{len(content)} characters."
+    )
+
+    # --------------------------------------------------------
+    # TEXT CHUNKING
+    # --------------------------------------------------------
+
+    logger.info("[UPLOAD] Starting text chunking...")
+
+    chunk_size = 600
+    overlap_words = 15
+
+    chunks = []
+    words = content.split()
+
+    current_chunk = []
+    current_len = 0
+
+    for word in words:
+        current_chunk.append(word)
+        current_len += len(word) + 1
+
+        if current_len >= chunk_size:
+            chunks.append(" ".join(current_chunk))
+
+            # Preserve the existing approximate overlap strategy.
+            current_chunk = current_chunk[-overlap_words:]
+            current_len = sum(
+                len(w) + 1
+                for w in current_chunk
+            )
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    if not chunks:
+        raise ValueError(
+            "Could not create document chunks."
+        )
+
+    logger.info(
+        f"[UPLOAD] Created {len(chunks)} chunks."
+    )
+
+    # --------------------------------------------------------
+    # SESSION COLLECTION + UNIQUE IDS
+    # --------------------------------------------------------
+
+    session_collection_name = f"session_{session_id}"
+    upload_id = uuid.uuid4().hex
+
+    ids = [
+        f"{session_id}_{upload_id}_chunk_{idx}"
+        for idx in range(len(chunks))
+    ]
+
+    metadatas = [
+        {
+            "source": filename,
+            "session_id": session_id,
+        }
+        for _ in chunks
+    ]
+
+    # --------------------------------------------------------
+    # CHROMA INDEXING
+    # --------------------------------------------------------
+
+    logger.info(
+        f"[UPLOAD] Starting Chroma indexing: "
+        f"{len(chunks)} chunks -> "
+        f"{session_collection_name}"
+    )
+
+    # Chroma embedding + writes are blocking and relatively expensive.
+    # Serialize this critical section to reduce intermittent failures when
+    # more than one request reaches the same Render instance.
+    with chroma_write_lock:
+        collection = chroma_client.get_or_create_collection(
+            name=session_collection_name,
+            embedding_function=onnx_ef,
+        )
+
+        # Batch large documents instead of sending every chunk in one
+        # enormous Chroma operation.
+        batch_size = 32
+
+        for start_idx in range(0, len(chunks), batch_size):
+            end_idx = min(
+                start_idx + batch_size,
+                len(chunks)
+            )
+
+            logger.info(
+                f"[UPLOAD] Indexing chunks "
+                f"{start_idx + 1}-{end_idx} "
+                f"of {len(chunks)}..."
+            )
+
+            collection.add(
+                documents=chunks[start_idx:end_idx],
+                metadatas=metadatas[start_idx:end_idx],
+                ids=ids[start_idx:end_idx],
+            )
+
+    logger.info(
+        f"[UPLOAD] Chroma indexing completed: "
+        f"{len(chunks)} chunks."
+    )
+
+    return {
+        "filename": filename,
+        "chunks_count": len(chunks),
+        "collection": session_collection_name,
+        "message": "File processed and indexed successfully.",
+    }
+
+
 @app.post("/api/upload")
 async def upload_document(
     session_id: str = Form(...),
     file: UploadFile = File(...)
 ):
-
     """
     Upload a TXT, MD, or PDF document.
 
-    The document is extracted, chunked, embedded,
-    and stored in the session-specific ChromaDB collection.
+    The async endpoint reads the uploaded bytes and delegates all
+    CPU/blocking work to a worker thread. This prevents PDF parsing and
+    Chroma embedding/indexing from blocking FastAPI's event loop.
     """
 
     if not file:
-
         raise HTTPException(
             status_code=400,
             detail="No file uploaded."
         )
 
-
     if not file.filename:
-
         raise HTTPException(
             status_code=400,
             detail="Uploaded file has no filename."
         )
 
-
-    # ========================================================
+    # --------------------------------------------------------
     # FILE VALIDATION
-    # ========================================================
+    # --------------------------------------------------------
 
-    file_ext = os.path.splitext(
-        file.filename
-    )[1].lower()
+    filename = file.filename
+    file_ext = os.path.splitext(filename)[1].lower()
 
-
-    if file_ext not in [
-        ".txt",
-        ".md",
-        ".pdf"
-    ]:
-
+    if file_ext not in [".txt", ".md", ".pdf"]:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -624,315 +821,59 @@ async def upload_document(
             )
         )
 
-
     logger.info(
-        f"Uploading file '{file.filename}' "
-        f"for session '{session_id}'"
+        f"[UPLOAD] Request received: "
+        f"'{filename}' | session={session_id}"
     )
 
-
     try:
-
-        # ====================================================
-        # READ FILE
-        # ====================================================
-
-        content = ""
-
-
         # ----------------------------------------------------
-        # TXT / MD
+        # READ UPLOAD
         # ----------------------------------------------------
 
-        if file_ext in [
-            ".txt",
-            ".md"
-        ]:
+        logger.info(
+            f"[UPLOAD] Reading uploaded file '{filename}'..."
+        )
 
-            content_bytes = await file.read()
+        file_bytes = await file.read()
 
-            content = content_bytes.decode(
-                "utf-8",
-                errors="ignore"
-            )
-
-
-        # ----------------------------------------------------
-        # PDF
-        # ----------------------------------------------------
-
-        elif file_ext == ".pdf":
-
-            import tempfile
-
-
-            tmp_path = None
-
-
-            try:
-
-                with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=".pdf"
-                ) as tmp:
-
-                    tmp_path = tmp.name
-
-                    shutil.copyfileobj(
-                        file.file,
-                        tmp
-                    )
-
-
-                try:
-
-                    import pypdf
-
-                except ImportError:
-
-                    raise HTTPException(
-                        status_code=500,
-                        detail=(
-                            "PDF parsing package "
-                            "(pypdf) is not installed "
-                            "on the server."
-                        )
-                    )
-
-
-                reader = pypdf.PdfReader(
-                    tmp_path
-                )
-
-
-                text_list = []
-
-
-                for page in reader.pages:
-
-                    page_text = (
-                        page.extract_text()
-                        or ""
-                    )
-
-                    text_list.append(
-                        page_text
-                    )
-
-
-                content = "\n".join(
-                    text_list
-                )
-
-
-            finally:
-
-                if (
-                    tmp_path
-                    and os.path.exists(tmp_path)
-                ):
-
-                    os.remove(
-                        tmp_path
-                    )
-
-
-        # ====================================================
-        # CONTENT VALIDATION
-        # ====================================================
-
-        if not content.strip():
-
+        if not file_bytes:
             raise HTTPException(
                 status_code=400,
                 detail="Uploaded file is empty."
             )
 
+        logger.info(
+            f"[UPLOAD] Received {len(file_bytes) / 1024:.1f} KB "
+            f"for '{filename}'."
+        )
 
-        # ====================================================
-        # TEXT CHUNKING
-        # ====================================================
+        # ----------------------------------------------------
+        # PROCESS IN WORKER THREAD
+        # ----------------------------------------------------
 
-        chunk_size = 600
-
-        overlap = 120
-
-        chunks = []
-
-
-        words = content.split()
-
-        current_chunk = []
-
-        current_len = 0
-
-
-        for word in words:
-
-            current_chunk.append(
-                word
-            )
-
-            current_len += (
-                len(word) + 1
-            )
-
-
-            if current_len >= chunk_size:
-
-                chunks.append(
-                    " ".join(
-                        current_chunk
-                    )
-                )
-
-
-                # Approximate overlap
-                # using the last 15 words
-
-                current_chunk = (
-                    current_chunk[-15:]
-                )
-
-
-                current_len = sum(
-                    len(w) + 1
-                    for w in current_chunk
-                )
-
-
-        # Add remaining text
-
-        if current_chunk:
-
-            chunks.append(
-                " ".join(
-                    current_chunk
-                )
-            )
-
-
-        if not chunks:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Could not create document chunks."
-                )
-            )
-
+        result = await asyncio.to_thread(
+            _process_and_index_document,
+            file_bytes,
+            filename,
+            file_ext,
+            session_id,
+        )
 
         logger.info(
-            f"Split document into "
-            f"{len(chunks)} chunks."
+            f"[UPLOAD] SUCCESS: '{filename}' -> "
+            f"{result['chunks_count']} chunks."
         )
 
-
-        # ====================================================
-        # SESSION COLLECTION
-        # ====================================================
-
-        session_collection_name = (
-            f"session_{session_id}"
-        )
-
-
-        collection = (
-            chroma_client.get_or_create_collection(
-                name=session_collection_name,
-                embedding_function=onnx_ef
-            )
-        )
-
-
-        # ====================================================
-        # UNIQUE DOCUMENT ID
-        # ====================================================
-
-        upload_id = uuid.uuid4().hex
-
-
-        ids = [
-
-            (
-                f"{session_id}_"
-                f"{upload_id}_"
-                f"chunk_{idx}"
-            )
-
-            for idx in range(
-                len(chunks)
-            )
-        ]
-
-
-        metadatas = [
-
-            {
-                "source":
-                    file.filename,
-
-                "session_id":
-                    session_id
-            }
-
-            for _ in chunks
-        ]
-
-
-        # ====================================================
-        # ADD TO CHROMADB
-        # ====================================================
-
-        collection.add(
-
-            documents=chunks,
-
-            metadatas=metadatas,
-
-            ids=ids
-        )
-
-
-        logger.info(
-            f"Successfully added "
-            f"{len(chunks)} chunks to "
-            f"collection "
-            f"{session_collection_name}"
-        )
-
-
-        # ====================================================
-        # SUCCESS RESPONSE
-        # ====================================================
-
-        return {
-
-            "filename":
-                file.filename,
-
-            "chunks_count":
-                len(chunks),
-
-            "collection":
-                session_collection_name,
-
-            "message":
-                "File processed and indexed successfully."
-        }
-
+        return result
 
     except HTTPException:
-
         raise
 
-
     except Exception as e:
-
         logger.exception(
-            "Error uploading file"
+            f"[UPLOAD] FAILED: '{filename}'"
         )
-
 
         raise HTTPException(
             status_code=500,
